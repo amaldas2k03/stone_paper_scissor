@@ -1,0 +1,17 @@
+# Backend dependencies for the camera Rock-Paper-Scissors game.
+# Tested with Python 3.11 (MediaPipe supports 3.8–3.12).
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# Hand landmark detection.
+mediapipe==0.10.18
+
+# Image decoding for incoming JPEG frames.
+opencv-python==4.10.0.84
+
+# MediaPipe 0.10.x requires NumPy < 2.
+numpy<2
+
+# Pydantic v2 (bundled with the FastAPI version above, pinned for clarity).
+pydantic==2.10.4

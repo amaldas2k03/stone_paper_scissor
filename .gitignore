@@ -1,0 +1,39 @@
+# ---- Python -------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Node (only if a JS toolchain is added later) -----------------------
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# ---- Local env / secrets ------------------------------------------------
+.env
+.env.*
+*.local
+
+# ---- Editor / OS junk ---------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

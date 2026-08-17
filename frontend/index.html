@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Camera Rock · Paper · Scissors</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✊</text></svg>" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <h1 class="logo">✊ <span>Rock</span> ✋ <span>Paper</span> ✌️ <span>Scissors</span></h1>
+      <p class="tagline">Show your hand to the camera. The AI reads your gesture.</p>
+      <div id="connection" class="conn conn--connecting" title="Backend connection status">
+        <span class="conn__dot"></span><span id="connText">Connecting…</span>
+      </div>
+    </header>
+
+    <main class="stage">
+      <!-- Camera + landmark overlay -->
+      <section class="camera-card">
+        <div class="camera-wrap" id="cameraWrap">
+          <video id="video" playsinline autoplay muted></video>
+          <canvas id="overlay"></canvas>
+
+          <!-- Live gesture read-out -->
+          <div class="live-badge" id="liveBadge">
+            <span class="live-badge__emoji" id="liveEmoji">🖐️</span>
+            <span class="live-badge__label" id="liveLabel">Waiting…</span>
+          </div>
+
+          <!-- Countdown / shoot overlay -->
+          <div class="countdown" id="countdown" hidden>
+            <div class="countdown__text" id="countdownText">Rock</div>
+          </div>
+
+          <!-- Camera permission / error overlay -->
+          <div class="cam-error" id="camError" hidden>
+            <div class="cam-error__box">
+              <div class="cam-error__icon">📷</div>
+              <p id="camErrorText">Requesting camera access…</p>
+              <button class="btn btn--ghost" id="retryCamBtn" hidden>Try again</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="status-bar">
+          <span id="statusMessage">Grant camera access to begin.</span>
+        </div>
+      </section>
+
+      <!-- Game panel -->
+      <section class="game-card">
+        <!-- Reveal area -->
+        <div class="reveal">
+          <div class="reveal__side">
+            <div class="reveal__hand" id="playerHand">🖐️</div>
+            <div class="reveal__name">You</div>
+            <div class="reveal__move" id="playerMove">—</div>
+          </div>
+
+          <div class="reveal__center">
+            <div class="reveal__result" id="resultText">Ready?</div>
+            <div class="reveal__vs">vs</div>
+          </div>
+
+          <div class="reveal__side">
+            <div class="reveal__hand" id="computerHand">🤖</div>
+            <div class="reveal__name">Computer</div>
+            <div class="reveal__move" id="computerMove">—</div>
+          </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="controls">
+          <button class="btn btn--primary" id="playBtn" disabled>Start Round</button>
+          <button class="btn btn--ghost" id="resetBtn">Reset Score</button>
+        </div>
+
+        <!-- Scoreboard -->
+        <div class="scoreboard">
+          <div class="score score--win">
+            <div class="score__num" id="scoreWins">0</div>
+            <div class="score__lbl">Wins</div>
+          </div>
+          <div class="score score--lose">
+            <div class="score__num" id="scoreLosses">0</div>
+            <div class="score__lbl">Losses</div>
+          </div>
+          <div class="score score--tie">
+            <div class="score__num" id="scoreTies">0</div>
+            <div class="score__lbl">Ties</div>
+          </div>
+        </div>
+
+        <!-- History -->
+        <div class="history">
+          <h2 class="history__title">Match history</h2>
+          <ul class="history__list" id="historyList">
+            <li class="history__empty">No rounds played yet.</li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <p>Rock = fist ✊ · Paper = open hand ✋ · Scissors = index + middle ✌️</p>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

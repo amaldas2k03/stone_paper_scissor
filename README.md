@@ -128,12 +128,21 @@ not counted — you'll be asked to try again.
 
 The backend runs MediaPipe Hands on each frame to get **21 landmarks** per hand.
 `gesture_classifier.py` then decides, for each of the four non-thumb fingers,
-whether it is **extended** or **curled**:
+whether it is **extended** or **curled** — using an **orientation-invariant**
+feature so the result doesn't depend on how the hand is posed:
 
-> A finger is *extended* when its fingertip is **farther from the wrist** than
-> its middle (PIP) joint, and *curled* when the tip folds back closer to the
-> wrist. Using distances to the wrist (rather than raw up/down positions) keeps
-> the test working whether the hand points up, sideways or is tilted.
+> A finger's curl is measured by the **interior angle at its PIP joint**
+> (MCP → PIP → TIP). A straight/extended finger is near **180°**; a curled one
+> is a small angle. An angle between two vectors is naturally invariant to where
+> the hand is (translation), how big it appears (scale / distance from camera)
+> and how it is rotated — and, because the whole bone foreshortens together, it
+> stays reliable even when the hand is **tilted toward or away from the camera**.
+
+These features live in [`features.py`](backend/features.py), which also provides
+a `normalize_landmarks()` canonicalisation (translate to the wrist, scale by the
+wrist→middle-MCP length, rotate the in-plane orientation to a fixed axis) and an
+`augment_landmarks()` helper for synthetic rotation/scale/jitter/mirror — used
+both as data-augmentation and to test invariance.
 
 From the finger states:
 
@@ -144,10 +153,33 @@ From the finger states:
 | scissors |  ✓    |   ✓    |  ✗   |  ✗    |
 
 Anything else is reported as `unknown`. A **confidence** score reflects how
-decisively each finger sat on its extended/curled boundary, so half-curled,
-in-between poses score low and are rejected. If **multiple hands** are in frame,
-the largest (closest to the camera) is used. See the docstring in
-[`gesture_classifier.py`](backend/gesture_classifier.py) for the full details.
+decisively each finger's angle sat on its extended/curled boundary, so
+half-curled, in-between poses score low and are rejected.
+
+**Runtime safeguards:**
+
+- The server downgrades any detection below a confidence floor to `unknown`
+  (`RPS_MIN_CONFIDENCE`, default `0.35`) so the client never acts on a shaky
+  guess; the frontend then prompts the player to reposition their hand.
+- At **Shoot!** the frontend takes a **majority vote over the last several
+  frames** rather than trusting one frame, smoothing momentary misdetections.
+- Set `RPS_LOG_FAILURES=1` to log low-confidence / `unknown` detections (with
+  their landmarks) for offline inspection of failure patterns.
+
+If **multiple hands** are in frame, the largest (closest to the camera) is used.
+See the docstring in [`gesture_classifier.py`](backend/gesture_classifier.py)
+for the full details.
+
+### Why the previous approach broke on rotated/tilted hands
+
+The earlier classifier decided extended-vs-curled from the **distance** between
+the fingertip and the wrist versus the PIP joint and the wrist. That is fine for
+in-plane rotation and scale, but a 2-D distance **foreshortens** when the hand
+angles toward/away from the camera, so extended fingers read as curled and the
+gesture flipped to `unknown` or the wrong class. Joint **angles** don't have
+that failure mode, which is why recognition now holds up across hand
+orientations. See `test_invariant_to_out_of_plane_tilt` for the regression this
+fixes.
 
 ---
 
@@ -178,11 +210,20 @@ python -m pytest tests/ -q
 
 ## Assumptions & simplifications
 
-- **Rule-based** classifier (the required path). The prompt's optional
-  ML-classifier stretch goal is not implemented; the geometric rules are robust
-  for clear, well-lit gestures. The rule engine is isolated in
-  `gesture_classifier.py`, so a trained model could be dropped in behind the same
-  `classify()` interface with the rules as a fallback.
+- **Rule-based** classifier (the required path) — there is no trained model or
+  collected dataset in this repo, so the robustness fix is applied to the
+  *features* the rules run on (rotation/scale/perspective-invariant joint
+  angles) rather than by retraining. The rule engine is isolated in
+  `gesture_classifier.py` and the invariant features in `features.py`
+  (including a ready-made `feature_vector()`), so a trained model (SVM / small
+  NN) could be dropped in behind the same `classify()` interface, trained on the
+  same invariant features, with the rules as a fallback.
+- **Known limitations:** at extreme angles fingers **occlude** one another (e.g.
+  a fist pointed straight at the lens, or scissors edge-on), which no
+  single-frame classifier can resolve — these correctly fall through to
+  `unknown`. MediaPipe's `z` (depth) is a coarse relative estimate, so the
+  perspective robustness degrades near ±90° tilt. Very fast motion at the exact
+  Shoot! frame is smoothed by the multi-frame vote but not eliminated.
 - The game runs on **localhost over `ws://`**. For remote/HTTPS deployment you'd
   serve over `wss://` behind TLS.
 - Score/history persistence is **per-browser** via `localStorage` (session-scoped

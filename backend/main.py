@@ -28,14 +28,15 @@ from typing import List, Optional
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 
 from game_logic import MOVES, play_round
-from gesture_classifier import classify
+from features import finger_curl_angles
 from hand_detector import HandDetector
+from pipeline import analyze
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,11 +44,47 @@ logging.basicConfig(
 )
 logger = logging.getLogger("rps.server")
 
+# Gestures at or below this confidence are downgraded to "unknown" server-side
+# so the client never acts on a low-confidence guess (the client applies its own
+# stricter threshold + multi-frame voting at the "Shoot!" moment). Overridable
+# via the RPS_MIN_CONFIDENCE env var for tuning.
+MIN_CONFIDENCE = float(os.environ.get("RPS_MIN_CONFIDENCE", "0.35"))
+
+# Set RPS_LOG_FAILURES=1 to log low-confidence / unknown detections (with their
+# raw landmarks) so failure patterns can be inspected during testing.
+LOG_FAILURES = os.environ.get("RPS_LOG_FAILURES", "").strip().lower() in {"1", "true", "yes"}
+
+# Set RPS_DEBUG_ANGLES=1 to log the per-finger curl angles of every detected
+# hand — a diagnostic for tuning the extended/curled thresholds against real
+# camera data.
+DEBUG_ANGLES = os.environ.get("RPS_DEBUG_ANGLES", "").strip().lower() in {"1", "true", "yes"}
+
+# Set RPS_DUMP_DIR=<path> to save the first few received frames as PNGs, so the
+# exact image fed to MediaPipe can be inspected (resolution, distortion, etc.).
+DUMP_DIR = os.environ.get("RPS_DUMP_DIR", "").strip()
+DUMP_MAX = 12
+_dump_count = 0
+
 # Resolve the frontend directory relative to this file (../frontend).
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.normpath(os.path.join(BASE_DIR, "..", "frontend"))
 
 app = FastAPI(title="Camera Rock-Paper-Scissors", version="1.0.0")
+
+
+@app.middleware("http")
+async def _no_cache(request: Request, call_next):
+    """Serve HTML/JS/CSS uncached so the browser can't run a stale frontend.
+
+    Without this, browsers hold on to old copies of index.html / app.js /
+    style.css (even the cache-busting query trick fails, because the cached
+    index.html keeps referencing the old asset URLs). Cheap and correct for a
+    local single-user dev app; drop or scope to assets if this is ever put
+    behind a CDN.
+    """
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    return response
 
 
 # --------------------------------------------------------------------------- #
@@ -120,10 +157,27 @@ def _analyse(detector: HandDetector, image_bgr: np.ndarray) -> dict:
     Runs synchronously (called inside a threadpool). Returns a JSON-serialisable
     analysis dict.
     """
-    hands_landmarks, handedness = detector.detect(image_bgr)
-    hand_count = len(hands_landmarks)
+    # Optional diagnostic: dump the first few received frames to disk.
+    global _dump_count
+    if DUMP_DIR and _dump_count < DUMP_MAX:
+        try:
+            os.makedirs(DUMP_DIR, exist_ok=True)
+            path = os.path.join(DUMP_DIR, f"frame_{_dump_count:03d}.png")
+            cv2.imwrite(path, image_bgr)
+            _dump_count += 1
+        except Exception:
+            logger.exception("Frame dump failed")
 
-    if hand_count == 0:
+    # Shared detect + classify path (identical to the standalone detector).
+    det = analyze(detector, image_bgr, MIN_CONFIDENCE)
+
+    if DEBUG_ANGLES:
+        logger.info(
+            "frame shape=%s hands=%d gesture=%s conf=%.2f",
+            getattr(image_bgr, "shape", None), det.hand_count, det.gesture, det.confidence,
+        )
+
+    if det.gesture == "none":
         return {
             "type": "analysis",
             "gesture": "none",
@@ -135,26 +189,41 @@ def _analyse(detector: HandDetector, image_bgr: np.ndarray) -> dict:
             "message": "No hand detected — show your hand clearly.",
         }
 
-    # With multiple hands, play with the largest (closest to camera).
-    idx = detector.largest_hand_index(hands_landmarks) or 0
-    landmarks = hands_landmarks[idx]
-    gesture, confidence, _states = classify(landmarks)
+    landmarks = det.landmarks or []
+
+    if DEBUG_ANGLES:
+        angs = finger_curl_angles(landmarks)
+        logger.info(
+            "angles idx=%.0f mid=%.0f ring=%.0f pinky=%.0f -> %s (%.2f)",
+            angs["index"], angs["middle"], angs["ring"], angs["pinky"],
+            det.gesture, det.confidence,
+        )
+
+    # Log failures (unknown / low-confidence, both surface as 'unknown') for
+    # offline inspection when asked.
+    if LOG_FAILURES and det.gesture == "unknown":
+        logger.info(
+            "Low-confidence/unknown detection: states=%s conf=%.3f landmarks=%s",
+            det.finger_states,
+            det.confidence,
+            [[round(x, 4), round(y, 4), round(z, 4)] for x, y, z in landmarks],
+        )
 
     message = None
-    if hand_count > 1:
+    if det.hand_count > 1:
         message = "Multiple hands detected — using the largest one."
-    elif gesture == "unknown":
-        message = "Gesture unclear — make a clear rock, paper or scissors."
+    elif det.gesture == "unknown":
+        message = "Gesture unclear — reposition your hand and make a clear rock, paper or scissors."
 
     return {
         "type": "analysis",
-        "gesture": gesture,
-        "confidence": confidence,
+        "gesture": det.gesture,
+        "confidence": det.confidence,
         # Send x,y (and z) so the frontend can draw the skeleton overlay.
         "landmarks": [[round(x, 5), round(y, 5), round(z, 5)] for x, y, z in landmarks],
         "connections": detector.connections,
-        "hand_count": hand_count,
-        "handedness": handedness[idx] if idx < len(handedness) else None,
+        "hand_count": det.hand_count,
+        "handedness": det.handedness,
         "message": message,
     }
 

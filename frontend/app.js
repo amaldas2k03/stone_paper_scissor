@@ -21,10 +21,9 @@
   // ------------------------------------------------------------------ config
   const WS_URL = `ws://${location.host}/ws`;
   const API_PLAY = "/api/play";
-  const FRAME_INTERVAL_MS = 130;      // ~7-8 fps sent to backend
-  const CAPTURE_W = 480;              // downscaled frame size for low latency
-  const CAPTURE_H = 360;
-  const JPEG_QUALITY = 0.6;
+  const FRAME_INTERVAL_MS = 110;      // ~9 fps sent to backend
+  const CAPTURE_TARGET_W = 640;       // frame width sent; aspect ratio preserved
+  const JPEG_QUALITY = 0.82;          // higher quality -> more reliable detection
   const CHANT = ["Rock", "Paper", "Scissors", "Shoot!"];
   const CHANT_BEAT_MS = 650;
   const MIN_CONFIDENCE = 0.3;        // reject very ambiguous gestures at shoot
@@ -63,10 +62,9 @@
   };
 
   const octx = el.overlay.getContext("2d");
-  // Offscreen canvas used to grab & downscale frames before sending.
+  // Offscreen canvas used to grab & downscale frames before sending. Sized
+  // dynamically from the video's aspect ratio in sendFrame().
   const grabCanvas = document.createElement("canvas");
-  grabCanvas.width = CAPTURE_W;
-  grabCanvas.height = CAPTURE_H;
   const grabCtx = grabCanvas.getContext("2d");
 
   // ------------------------------------------------------------------ state
@@ -130,7 +128,22 @@
         audio: false,
       });
       el.video.srcObject = stream;
-      await el.video.play();
+      // Wait for the stream's dimensions before sizing canvases / capturing,
+      // with a safety timeout so a flaky loadedmetadata event can't hang us on
+      // the "Requesting camera access…" state.
+      if (!el.video.videoWidth) {
+        await new Promise((resolve) => {
+          const done = () => resolve();
+          el.video.addEventListener("loadedmetadata", done, { once: true });
+          setTimeout(done, 1500);
+        });
+      }
+      try {
+        await el.video.play();
+      } catch (err) {
+        // Autoplay policies can reject play(); the stream still renders.
+        console.warn("video.play() rejected; continuing", err);
+      }
       // Size the overlay canvas to the video's intrinsic resolution.
       el.overlay.width = el.video.videoWidth || 1280;
       el.overlay.height = el.video.videoHeight || 720;
@@ -168,8 +181,18 @@
   function sendFrame() {
     if (!state.wsReady || el.video.readyState < 2) return;
     try {
-      // Draw the current video frame downscaled, then encode as JPEG.
-      grabCtx.drawImage(el.video, 0, 0, CAPTURE_W, CAPTURE_H);
+      // Size the capture canvas to the video's aspect ratio so the hand is not
+      // distorted (the camera is typically 16:9), at a fixed target width.
+      const vw = el.video.videoWidth || 640;
+      const vh = el.video.videoHeight || 480;
+      const cw = CAPTURE_TARGET_W;
+      const ch = Math.max(1, Math.round((vh / vw) * cw));
+      if (grabCanvas.width !== cw || grabCanvas.height !== ch) {
+        grabCanvas.width = cw;
+        grabCanvas.height = ch;
+      }
+      // Draw the current video frame, then encode as JPEG.
+      grabCtx.drawImage(el.video, 0, 0, cw, ch);
       const dataUrl = grabCanvas.toDataURL("image/jpeg", JPEG_QUALITY);
       state.ws.send(JSON.stringify({ type: "frame", data: dataUrl }));
     } catch (err) {
@@ -338,7 +361,8 @@
 
     if (!move) {
       setStatus(
-        "No clear gesture at “Shoot!” — that round didn’t count. Try again.",
+        "No clear gesture at “Shoot!” — that round didn’t count. Reposition your " +
+          "hand (face it to the camera, fill more of the frame) and try again.",
         "warn"
       );
       el.resultText.textContent = "Retry";

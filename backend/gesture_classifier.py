@@ -22,129 +22,104 @@ MediaPipe landmark indices (see https://google.github.io/mediapipe/solutions/han
            \\|/
             0                 <- wrist
 
-The classification strategy is intentionally simple and orientation-tolerant:
+Orientation robustness
+======================
+Earlier versions decided "extended vs curled" from the *distance* between the
+fingertip and the wrist versus the PIP joint and the wrist. That is invariant to
+in-plane rotation and scale, but it breaks when the hand tilts toward or away
+from the camera: the projected fingertip-to-wrist distance foreshortens, so an
+extended finger reads as curled.
 
-* For each of the four fingers (index, middle, ring, pinky) we decide whether it
-  is EXTENDED or CURLED by comparing how far the fingertip sits from the wrist
-  versus how far the finger's PIP joint sits from the wrist. When a finger
-  curls, the tip folds back toward the palm, so tip-to-wrist distance shrinks
-  below pip-to-wrist distance. This ratio test works regardless of whether the
-  hand points up, sideways, or is tilted, which a raw "is the tip above the
-  joint?" y-coordinate test would not.
+This version instead measures each finger's curl by the **interior angle at its
+PIP joint** (MCP->PIP->TIP), computed in ``features.py``:
 
-* The thumb is handled separately because it moves sideways rather than
-  curling toward the wrist. We measure the thumb tip's distance to the index
-  finger's MCP joint, normalised by overall hand size.
+* An angle between two vectors is inherently invariant to translation, scale and
+  rotation — a rotated or moved hand produces the same angle.
+* It is measured in the 2-D image plane (x, y). MediaPipe's z depth is a coarse,
+  noisy estimate that, folded into the angle, makes even straight fingers read
+  as slightly bent. The image-plane angle is still robust to perspective: a
+  straight finger projects to a straight line at any viewing angle, so a finger
+  pointing toward the camera still reads as ~180 degrees rather than "short".
 
-From the per-finger states the gesture is decided:
+An extended finger's PIP angle is near 180 degrees; a curled finger's is small.
+
+From the per-finger extended/curled states the gesture is decided:
 
     rock     -> all four fingers curled (a closed fist)
     paper    -> all four fingers extended (an open hand)
     scissors -> only index and middle extended (a "V")
     unknown  -> anything that doesn't cleanly match the above
 
-A confidence score in [0, 1] is derived from how decisively each finger sat on
-its side of the extended/curled boundary, so ambiguous half-curled hands report
-low confidence and can be rejected by the caller.
+A confidence score in [0, 1] is derived from how decisively each finger's angle
+sat on its side of the extended/curled boundary, so ambiguous half-curled hands
+report low confidence and can be rejected by the caller.
 """
 
 from __future__ import annotations
 
-import math
 from typing import Dict, List, Sequence, Tuple
 
-# Landmark indices grouped for readability.
-WRIST = 0
-THUMB_TIP = 4
-THUMB_IP = 3
-INDEX_MCP = 5
-MIDDLE_MCP = 9
-
-# (tip, pip) landmark index pairs for the four curling fingers.
-FINGER_JOINTS: Dict[str, Tuple[int, int]] = {
-    "index": (8, 6),
-    "middle": (12, 10),
-    "ring": (16, 14),
-    "pinky": (20, 18),
-}
-
-# A finger is treated as clearly EXTENDED when tip/pip distance-to-wrist ratio is
-# above EXTEND_THRESHOLD and clearly CURLED below CURL_THRESHOLD. The gap between
-# them is a dead-zone that produces lower confidence.
-EXTEND_THRESHOLD = 1.05
-CURL_THRESHOLD = 0.85
+from features import (
+    finger_curl_angles,
+    hand_scale,
+    thumb_curl_angle,
+    THUMB_TIP,
+    INDEX_MCP,
+    _dist,
+)
 
 Point = Sequence[float]
 
+# A finger is treated as clearly EXTENDED when its PIP interior angle is at or
+# above EXTEND_ANGLE, and clearly CURLED at or below CURL_ANGLE. The midpoint is
+# the boolean decision boundary; the gap around it is a dead-zone that yields
+# lower confidence. Values are in degrees.
+EXTEND_ANGLE = 160.0
+CURL_ANGLE = 110.0
+MID_ANGLE = (EXTEND_ANGLE + CURL_ANGLE) / 2.0   # 135 -> boolean boundary
+HALF_WIDTH = (EXTEND_ANGLE - CURL_ANGLE) / 2.0  # 25  -> confidence saturates here
 
-def _dist(a: Point, b: Point) -> float:
-    """Euclidean distance between two (x, y, z) landmarks."""
-    return math.sqrt(
-        (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2
-    )
-
-
-def _hand_size(landmarks: Sequence[Point]) -> float:
-    """A scale-invariant measure of hand size (wrist to middle-finger MCP)."""
-    size = _dist(landmarks[WRIST], landmarks[MIDDLE_MCP])
-    return size if size > 1e-6 else 1e-6
-
-
-def _finger_extension_ratios(landmarks: Sequence[Point]) -> Dict[str, float]:
-    """
-    For each curling finger, return tip-to-wrist / pip-to-wrist distance.
-
-    Ratio > 1 means the tip is farther from the wrist than the PIP joint, i.e.
-    the finger is stretched out. Ratio < 1 means the tip has folded back toward
-    the palm, i.e. the finger is curled.
-    """
-    wrist = landmarks[WRIST]
-    ratios: Dict[str, float] = {}
-    for name, (tip_idx, pip_idx) in FINGER_JOINTS.items():
-        pip_dist = _dist(landmarks[pip_idx], wrist)
-        tip_dist = _dist(landmarks[tip_idx], wrist)
-        ratios[name] = tip_dist / pip_dist if pip_dist > 1e-6 else 0.0
-    return ratios
+# Thumb: an interior IP angle above this is "extended". The thumb does not
+# affect the rock/paper/scissors decision (only the four fingers do), but the
+# state is reported for callers/overlays.
+THUMB_EXTEND_ANGLE = 150.0
 
 
-def _thumb_extended(landmarks: Sequence[Point]) -> bool:
-    """
-    Decide whether the thumb is splayed out.
+def _finger_confidence(angle: float, extended: bool) -> float:
+    """Map how far a finger's angle sits from the decision boundary into [0, 1].
 
-    Because the thumb abducts sideways rather than folding toward the wrist, we
-    look at how far the thumb tip sits from the index-finger MCP joint relative
-    to overall hand size. A tucked-in (fist) thumb sits close to that knuckle; a
-    splayed (open-hand) thumb sits noticeably farther away.
-    """
-    spread = _dist(landmarks[THUMB_TIP], landmarks[INDEX_MCP])
-    return spread / _hand_size(landmarks) > 0.9
-
-
-def _finger_confidence(ratio: float, extended: bool) -> float:
-    """
-    Map how far a finger's ratio sits from the decision boundary into [0, 1].
-
-    Fingers that are unambiguously extended or curled score near 1.0; fingers
-    sitting inside the EXTEND/CURL dead-zone score lower.
+    Fingers unambiguously extended (>= EXTEND_ANGLE) or curled (<= CURL_ANGLE)
+    score near 1.0; fingers sitting inside the dead-zone around MID_ANGLE score
+    lower, bottoming out at 0.5 exactly on the boundary.
     """
     if extended:
-        # Distance above the extend threshold, saturating around +0.25.
-        margin = (ratio - EXTEND_THRESHOLD) / 0.25
+        margin = (angle - MID_ANGLE) / HALF_WIDTH
     else:
-        # Distance below the curl threshold, saturating around -0.25.
-        margin = (CURL_THRESHOLD - ratio) / 0.25
+        margin = (MID_ANGLE - angle) / HALF_WIDTH
     return max(0.0, min(1.0, 0.5 + 0.5 * margin))
 
 
-def classify(landmarks: Sequence[Point]) -> Tuple[str, float, Dict[str, bool]]:
+def _thumb_extended(landmarks: Sequence[Point]) -> bool:
+    """Decide whether the thumb is splayed/straight rather than tucked in.
+
+    Uses the thumb's IP-joint angle (rotation-invariant) and, as a sanity check
+    for the fully-tucked fist where the thumb lies flat across the palm, its
+    distance from the index MCP normalised by hand size. Either a clearly bent
+    thumb or one hugging the index knuckle counts as "not extended".
     """
-    Classify a hand pose into 'rock', 'paper', 'scissors', or 'unknown'.
+    angle = thumb_curl_angle(landmarks)
+    spread = _dist(landmarks[THUMB_TIP], landmarks[INDEX_MCP]) / hand_scale(landmarks)
+    return angle >= THUMB_EXTEND_ANGLE and spread > 0.5
+
+
+def classify(landmarks: Sequence[Point]) -> Tuple[str, float, Dict[str, bool]]:
+    """Classify a hand pose into 'rock', 'paper', 'scissors', or 'unknown'.
 
     Args:
-        landmarks: sequence of 21 (x, y, z) landmark coordinates. The absolute
-            scale is irrelevant because every measurement is a ratio or is
-            normalised by hand size, so MediaPipe's normalised [0, 1]
-            coordinates work directly.
+        landmarks: sequence of 21 (x, y, z) landmark coordinates. Absolute
+            position, scale and rotation are irrelevant because every signal is
+            a joint angle; MediaPipe's normalised [0, 1] coordinates work
+            directly.
 
     Returns:
         (gesture, confidence, finger_states) where finger_states maps each
@@ -153,17 +128,16 @@ def classify(landmarks: Sequence[Point]) -> Tuple[str, float, Dict[str, bool]]:
     if landmarks is None or len(landmarks) < 21:
         return "unknown", 0.0, {}
 
-    ratios = _finger_extension_ratios(landmarks)
+    angles = finger_curl_angles(landmarks)
 
     # Per-finger extended/curled decision plus a confidence for that decision.
     states: Dict[str, bool] = {}
     confidences: List[float] = []
-    for name, ratio in ratios.items():
-        extended = ratio >= EXTEND_THRESHOLD
-        # Treat the dead-zone as "curled" for the boolean, but reflect the
-        # ambiguity through a reduced confidence.
+    for name in ("index", "middle", "ring", "pinky"):
+        angle = angles[name]
+        extended = angle >= MID_ANGLE
         states[name] = extended
-        confidences.append(_finger_confidence(ratio, extended))
+        confidences.append(_finger_confidence(angle, extended))
 
     states["thumb"] = _thumb_extended(landmarks)
 

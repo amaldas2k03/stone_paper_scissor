@@ -24,6 +24,11 @@
 
 * { box-sizing: border-box; }
 
+/* The `hidden` HTML attribute must win over component `display` rules
+   (e.g. .cam-error / .countdown set display:flex, which would otherwise keep
+   those overlays permanently visible even when toggled hidden in JS). */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   padding: 0;
